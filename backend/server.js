@@ -196,6 +196,57 @@ app.post('/api/notes', upload.single('file'), async (req, res) => {
   }
 });
 
+// Update existing note by title (or create if not exists)
+app.patch('/api/notes', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const content = req.file.buffer.toString('utf-8');
+    const title = req.file.originalname.replace('.txt', '');
+
+    // Try to find existing note by title
+    let note = await Note.findOne({ title: title });
+
+    if (note) {
+      // Update existing
+      note.content = content;
+      note.lastModified = new Date();
+      await note.save();
+      res.json({ 
+        message: 'Note updated successfully',
+        note: {
+          _id: note._id,
+          title: note.title,
+          preview: note.content.substring(0, 200),
+          lastModified: note.lastModified
+        }
+      });
+    } else {
+      // Create new
+      note = new Note({
+        title: title,
+        content: content,
+        lastModified: new Date()
+      });
+      await note.save();
+      res.status(201).json({ 
+        message: 'Note created successfully',
+        note: {
+          _id: note._id,
+          title: note.title,
+          preview: note.content.substring(0, 200),
+          lastModified: note.lastModified
+        }
+      });
+    }
+  } catch (error) {
+    console.error('Update error:', error);
+    res.status(500).json({ error: 'Failed to save note' });
+  }
+});
+
 // Delete note
 app.delete('/api/notes/:id', async (req, res) => {
   try {
