@@ -2,18 +2,52 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const multer = require('multer');
+const crypto = require('crypto');
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Simple token storage (in production, use Redis or similar)
+const validTokens = new Set();
+
+// Generate a random token
+function generateToken() {
+  return crypto.randomBytes(32).toString('hex');
+}
+
 // Middleware
 app.use(cors({
   origin: '*',
   methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type']
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
 app.use(express.json());
+
+// Auth middleware - protects all /api routes except /api/login
+function authMiddleware(req, res, next) {
+  // Skip auth for login endpoint
+  if (req.path === '/api/login') {
+    return next();
+  }
+  
+  const authHeader = req.headers.authorization;
+  
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Unauthorized - No token provided' });
+  }
+  
+  const token = authHeader.split(' ')[1];
+  
+  if (!validTokens.has(token)) {
+    return res.status(401).json({ error: 'Unauthorized - Invalid token' });
+  }
+  
+  next();
+}
+
+// Apply auth middleware to all /api routes
+app.use('/api', authMiddleware);
 
 // Multer setup for file uploads
 const storage = multer.memoryStorage();
@@ -58,6 +92,41 @@ const Note = mongoose.model('Note', noteSchema);
 // Health check
 app.get('/', (req, res) => {
   res.json({ status: 'ok', message: 'Notes API is running' });
+});
+
+// Login endpoint
+app.post('/api/login', (req, res) => {
+  const { password } = req.body;
+  const correctPassword = process.env.APP_PASSWORD;
+  
+  if (!correctPassword) {
+    console.error('APP_PASSWORD environment variable not set!');
+    return res.status(500).json({ error: 'Server configuration error' });
+  }
+  
+  if (password === correctPassword) {
+    const token = generateToken();
+    validTokens.add(token);
+    
+    // Optional: Clean up old tokens after 24 hours
+    setTimeout(() => {
+      validTokens.delete(token);
+    }, 24 * 60 * 60 * 1000);
+    
+    res.json({ success: true, token });
+  } else {
+    res.status(401).json({ error: 'Invalid password' });
+  }
+});
+
+// Logout endpoint
+app.post('/api/logout', (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.split(' ')[1];
+    validTokens.delete(token);
+  }
+  res.json({ success: true });
 });
 
 // Get all notes (without full content for grid view)

@@ -4,8 +4,16 @@ class NotesApp {
   constructor() {
     this.notes = [];
     this.currentNote = null;
+    this.authToken = null;
     
-    // DOM Elements
+    // DOM Elements - Login
+    this.loginPage = document.getElementById('login-page');
+    this.loginForm = document.getElementById('login-form');
+    this.passwordInput = document.getElementById('password-input');
+    this.loginBtn = document.getElementById('login-btn');
+    this.loginError = document.getElementById('login-error');
+    
+    // DOM Elements - App
     this.appView = document.getElementById('app');
     this.noteView = document.getElementById('note-view');
     this.notesGrid = document.getElementById('notes-grid');
@@ -27,11 +35,26 @@ class NotesApp {
   }
 
   init() {
+    // Check for existing session token
+    this.authToken = sessionStorage.getItem('authToken');
+    
+    if (this.authToken) {
+      // Verify token is still valid
+      this.verifyToken();
+    } else {
+      this.showLoginPage();
+    }
+    
     this.bindEvents();
-    this.fetchNotes();
   }
 
   bindEvents() {
+    // Login form submission
+    this.loginForm.addEventListener('submit', (e) => {
+      e.preventDefault();
+      this.handleLogin();
+    });
+
     // Add button click
     this.addBtn.addEventListener('click', () => {
       this.fileInput.click();
@@ -64,11 +87,120 @@ class NotesApp {
     });
   }
 
+  // Authentication Methods
+  async handleLogin() {
+    const password = this.passwordInput.value;
+    
+    if (!password) return;
+    
+    this.loginBtn.disabled = true;
+    this.loginBtn.innerHTML = '<span>Verifying...</span>';
+    this.loginError.classList.add('hidden');
+    
+    try {
+      const response = await fetch(`${CONFIG.API_URL}/api/login`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ password })
+      });
+      
+      const data = await response.json();
+      
+      if (response.ok && data.token) {
+        this.authToken = data.token;
+        sessionStorage.setItem('authToken', data.token);
+        this.showApp();
+        this.fetchNotes();
+      } else {
+        this.showLoginError(data.error || 'Invalid password');
+      }
+    } catch (error) {
+      console.error('Login error:', error);
+      this.showLoginError('Connection error. Please try again.');
+    }
+    
+    this.loginBtn.disabled = false;
+    this.loginBtn.innerHTML = `
+      <span>Enter</span>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3"/>
+      </svg>
+    `;
+  }
+
+  async verifyToken() {
+    try {
+      const response = await fetch(`${CONFIG.API_URL}/api/notes`, {
+        headers: {
+          'Authorization': `Bearer ${this.authToken}`
+        }
+      });
+      
+      if (response.ok) {
+        this.showApp();
+        this.notes = await response.json();
+        this.renderNotes();
+      } else {
+        // Token invalid, show login
+        this.logout();
+      }
+    } catch (error) {
+      console.error('Token verification error:', error);
+      this.logout();
+    }
+  }
+
+  logout() {
+    this.authToken = null;
+    sessionStorage.removeItem('authToken');
+    this.showLoginPage();
+  }
+
+  showLoginPage() {
+    this.loginPage.classList.remove('hidden');
+    this.appView.classList.add('hidden');
+    this.noteView.classList.add('hidden');
+    this.passwordInput.value = '';
+    this.passwordInput.focus();
+  }
+
+  showLoginError(message) {
+    this.loginError.textContent = message;
+    this.loginError.classList.remove('hidden');
+    this.passwordInput.focus();
+    this.passwordInput.select();
+  }
+
+  showApp() {
+    this.loginPage.classList.add('hidden');
+    this.appView.classList.remove('hidden');
+  }
+
+  // Helper method to make authenticated requests
+  async authFetch(url, options = {}) {
+    const headers = {
+      ...options.headers,
+      'Authorization': `Bearer ${this.authToken}`
+    };
+    
+    const response = await fetch(url, { ...options, headers });
+    
+    // If unauthorized, redirect to login
+    if (response.status === 401) {
+      this.logout();
+      throw new Error('Session expired. Please log in again.');
+    }
+    
+    return response;
+  }
+
   async fetchNotes() {
     this.showLoading();
     
     try {
-      const response = await fetch(`${CONFIG.API_URL}/api/notes`);
+      const response = await this.authFetch(`${CONFIG.API_URL}/api/notes`);
       
       if (!response.ok) {
         throw new Error('Failed to fetch notes');
@@ -142,7 +274,7 @@ class NotesApp {
 
   async openNote(noteId) {
     try {
-      const response = await fetch(`${CONFIG.API_URL}/api/notes/${noteId}`);
+      const response = await this.authFetch(`${CONFIG.API_URL}/api/notes/${noteId}`);
       
       if (!response.ok) {
         throw new Error('Failed to fetch note');
@@ -186,7 +318,7 @@ class NotesApp {
     try {
       this.updateProgress(30, 'Uploading to server...');
 
-      const response = await fetch(`${CONFIG.API_URL}/api/notes`, {
+      const response = await this.authFetch(`${CONFIG.API_URL}/api/notes`, {
         method: 'POST',
         body: formData
       });
@@ -227,7 +359,7 @@ class NotesApp {
     }
 
     try {
-      const response = await fetch(`${CONFIG.API_URL}/api/notes/${noteId}`, {
+      const response = await this.authFetch(`${CONFIG.API_URL}/api/notes/${noteId}`, {
         method: 'DELETE'
       });
 

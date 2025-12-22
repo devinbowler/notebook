@@ -1,7 +1,7 @@
 // Configuration file for the Notes App
 
 const CONFIG = {
-  API_URL: 'https://backend-url.onrender.com'
+  API_URL: 'https://notebook-1bqd.onrender.com'
 };
 
 // Make it available globally
