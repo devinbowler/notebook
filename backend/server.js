@@ -24,10 +24,11 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// Auth middleware - protects all /api routes except /api/login
+// Auth middleware - protects all /api routes except /api/login and /api/logout
 function authMiddleware(req, res, next) {
-  // Skip auth for login endpoint
-  if (req.path === '/api/login') {
+  // Skip auth for login and logout endpoints
+  // When mounted at /api, req.path is relative (e.g., /login, not /api/login)
+  if (req.path === '/login' || req.path === '/logout') {
     return next();
   }
   
@@ -99,9 +100,6 @@ app.post('/api/login', (req, res) => {
   const { password } = req.body;
   const correctPassword = process.env.APP_PASSWORD;
   
-  // Add this debug line temporarily
-  console.log('Login attempt. Password received:', password ? 'yes' : 'no', 'APP_PASSWORD set:', correctPassword ? 'yes' : 'no');
-  
   if (!correctPassword) {
     console.error('APP_PASSWORD environment variable not set!');
     return res.status(500).json({ error: 'Server configuration error' });
@@ -111,13 +109,13 @@ app.post('/api/login', (req, res) => {
     const token = generateToken();
     validTokens.add(token);
     
+    // Optional: Clean up old tokens after 24 hours
     setTimeout(() => {
       validTokens.delete(token);
     }, 24 * 60 * 60 * 1000);
     
     res.json({ success: true, token });
   } else {
-    console.log('Password mismatch'); // Add this
     res.status(401).json({ error: 'Invalid password' });
   }
 });
