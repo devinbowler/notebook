@@ -3,8 +3,10 @@
 class NotesApp {
   constructor() {
     this.notes = [];
+    this.folders = [];
     this.currentNote = null;
     this.authToken = null;
+    this.currentPath = '/'; // Current folder path
     
     // DOM Elements - Login
     this.loginPage = document.getElementById('login-page');
@@ -23,6 +25,7 @@ class NotesApp {
     this.fileInput = document.getElementById('file-input');
     this.backBtn = document.getElementById('back-btn');
     this.deleteBtn = document.getElementById('delete-btn');
+    this.copyBtn = document.getElementById('copy-btn');
     this.noteTitle = document.getElementById('note-title');
     this.noteDate = document.getElementById('note-date');
     this.noteText = document.getElementById('note-text');
@@ -30,6 +33,11 @@ class NotesApp {
     this.progressFill = document.getElementById('progress-fill');
     this.uploadStatus = document.getElementById('upload-status');
     this.toastContainer = document.getElementById('toast-container');
+    
+    // Breadcrumb Elements
+    this.breadcrumb = document.getElementById('breadcrumb');
+    this.breadcrumbPath = document.getElementById('breadcrumb-path');
+    this.homeBtn = document.getElementById('home-btn');
 
     this.init();
   }
@@ -79,11 +87,103 @@ class NotesApp {
       }
     });
 
+    // Copy button
+    this.copyBtn.addEventListener('click', () => {
+      this.copyNoteContent();
+    });
+
+    // Home button in breadcrumb
+    this.homeBtn.addEventListener('click', () => {
+      this.navigateToPath('/');
+    });
+
     // Keyboard navigation
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && !this.noteView.classList.contains('hidden')) {
         this.hideNoteView();
       }
+      // Ctrl/Cmd + C to copy when note is open
+      if ((e.ctrlKey || e.metaKey) && e.key === 'c' && !this.noteView.classList.contains('hidden')) {
+        // Only copy if no text is selected
+        if (!window.getSelection().toString()) {
+          e.preventDefault();
+          this.copyNoteContent();
+        }
+      }
+    });
+  }
+
+  // Copy note content to clipboard
+  async copyNoteContent() {
+    if (!this.currentNote) return;
+
+    try {
+      await navigator.clipboard.writeText(this.currentNote.content);
+      
+      // Update button to show copied state
+      this.copyBtn.classList.add('copied');
+      const originalHTML = this.copyBtn.innerHTML;
+      this.copyBtn.innerHTML = `
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+        </svg>
+        <span>Copied!</span>
+      `;
+
+      this.showToast('Content copied to clipboard!', 'success');
+
+      // Reset button after 2 seconds
+      setTimeout(() => {
+        this.copyBtn.classList.remove('copied');
+        this.copyBtn.innerHTML = originalHTML;
+      }, 2000);
+    } catch (error) {
+      console.error('Copy failed:', error);
+      this.showToast('Failed to copy content', 'error');
+    }
+  }
+
+  // Navigation methods
+  navigateToPath(path) {
+    this.currentPath = path;
+    this.updateBreadcrumb();
+    this.fetchNotes();
+  }
+
+  updateBreadcrumb() {
+    const pathParts = this.currentPath.split('/').filter(p => p);
+    
+    let html = '<span class="breadcrumb-separator">/</span>';
+    
+    if (pathParts.length === 0) {
+      html += '<span class="breadcrumb-current">Root</span>';
+    } else {
+      // Build clickable breadcrumb items
+      let accumulatedPath = '';
+      pathParts.forEach((part, index) => {
+        accumulatedPath += '/' + part;
+        const isLast = index === pathParts.length - 1;
+        
+        if (isLast) {
+          html += `<span class="breadcrumb-current">${this.escapeHtml(part)}</span>`;
+        } else {
+          html += `
+            <button class="breadcrumb-item" data-path="${this.escapeHtml(accumulatedPath)}">
+              ${this.escapeHtml(part)}
+            </button>
+            <span class="breadcrumb-separator">/</span>
+          `;
+        }
+      });
+    }
+    
+    this.breadcrumbPath.innerHTML = html;
+    
+    // Add click handlers to breadcrumb items
+    this.breadcrumbPath.querySelectorAll('.breadcrumb-item').forEach(item => {
+      item.addEventListener('click', () => {
+        this.navigateToPath(item.dataset.path);
+      });
     });
   }
 
@@ -132,7 +232,7 @@ class NotesApp {
 
   async verifyToken() {
     try {
-      const response = await fetch(`${CONFIG.API_URL}/api/notes`, {
+      const response = await fetch(`${CONFIG.API_URL}/api/notes?path=${encodeURIComponent(this.currentPath)}`, {
         headers: {
           'Authorization': `Bearer ${this.authToken}`
         }
@@ -140,8 +240,9 @@ class NotesApp {
       
       if (response.ok) {
         this.showApp();
-        this.notes = await response.json();
-        this.renderNotes();
+        const data = await response.json();
+        this.processNotesData(data);
+        this.updateBreadcrumb();
       } else {
         // Token invalid, show login
         this.logout();
@@ -200,14 +301,14 @@ class NotesApp {
     this.showLoading();
     
     try {
-      const response = await this.authFetch(`${CONFIG.API_URL}/api/notes`);
+      const response = await this.authFetch(`${CONFIG.API_URL}/api/notes?path=${encodeURIComponent(this.currentPath)}`);
       
       if (!response.ok) {
         throw new Error('Failed to fetch notes');
       }
 
-      this.notes = await response.json();
-      this.renderNotes();
+      const data = await response.json();
+      this.processNotesData(data);
     } catch (error) {
       console.error('Error fetching notes:', error);
       this.showToast('Failed to load notes. Please check your connection.', 'error');
@@ -216,21 +317,88 @@ class NotesApp {
     }
   }
 
+  processNotesData(data) {
+    // Handle both old format (array of notes) and new format (with folders)
+    if (Array.isArray(data)) {
+      this.notes = data;
+      this.folders = [];
+    } else {
+      this.notes = data.notes || [];
+      this.folders = data.folders || [];
+    }
+    this.renderNotes();
+  }
+
   renderNotes() {
     this.hideLoading();
     this.notesGrid.innerHTML = '';
 
-    if (this.notes.length === 0) {
+    if (this.notes.length === 0 && this.folders.length === 0) {
       this.showEmptyState();
       return;
     }
 
     this.hideEmptyState();
 
-    this.notes.forEach((note, index) => {
+    let index = 0;
+
+    // Render folders first
+    this.folders.forEach((folder) => {
+      const card = this.createFolderCard(folder, index);
+      this.notesGrid.appendChild(card);
+      index++;
+    });
+
+    // Then render notes
+    this.notes.forEach((note) => {
       const card = this.createNoteCard(note, index);
       this.notesGrid.appendChild(card);
+      index++;
     });
+  }
+
+  createFolderCard(folder, index) {
+    const card = document.createElement('div');
+    card.className = 'folder-card';
+    card.style.animationDelay = `${index * 0.05}s`;
+
+    const itemCount = (folder.noteCount || 0) + (folder.folderCount || 0);
+    const itemLabel = itemCount === 1 ? 'item' : 'items';
+
+    card.innerHTML = `
+      <div class="folder-card-content">
+        <div class="folder-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M2.25 12.75V12A2.25 2.25 0 014.5 9.75h15A2.25 2.25 0 0121.75 12v.75m-8.69-6.44l-2.12-2.12a1.5 1.5 0 00-1.061-.44H4.5A2.25 2.25 0 002.25 6v12a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9a2.25 2.25 0 00-2.25-2.25h-5.379a1.5 1.5 0 01-1.06-.44z"/>
+          </svg>
+        </div>
+        <div class="folder-info">
+          <h3 class="folder-name">${this.escapeHtml(folder.name)}</h3>
+          <p class="folder-meta">
+            <span>${itemCount} ${itemLabel}</span>
+          </p>
+        </div>
+      </div>
+      <div class="folder-footer">
+        <span class="open-folder">
+          Open folder
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3"/>
+          </svg>
+        </span>
+        <span class="item-count">${folder.folderCount || 0} folders, ${folder.noteCount || 0} notes</span>
+      </div>
+    `;
+
+    card.addEventListener('click', () => {
+      this.openFolder(folder.path);
+    });
+
+    return card;
+  }
+
+  openFolder(folderPath) {
+    this.navigateToPath(folderPath);
   }
 
   createNoteCard(note, index) {
@@ -314,6 +482,7 @@ class NotesApp {
 
     const formData = new FormData();
     formData.append('file', file);
+    formData.append('path', this.currentPath); // Include current path for folder context
 
     try {
       this.updateProgress(30, 'Uploading to server...');
