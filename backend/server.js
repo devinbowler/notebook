@@ -8,59 +8,12 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Token Schema for persistent storage
-const tokenSchema = new mongoose.Schema({
-  token: {
-    type: String,
-    required: true,
-    unique: true
-  },
-  createdAt: {
-    type: Date,
-    default: Date.now,
-    expires: 86400 // Auto-delete after 24 hours (TTL index)
-  }
-});
-
-let Token; // Will be initialized after mongoose connects
+// Simple token storage (in memory - tokens reset on server restart)
+const validTokens = new Set();
 
 // Generate a random token
 function generateToken() {
   return crypto.randomBytes(32).toString('hex');
-}
-
-// Async function to check if token is valid
-async function isValidToken(token) {
-  if (!Token) return false;
-  try {
-    const found = await Token.findOne({ token });
-    return !!found;
-  } catch (err) {
-    console.error('Token validation error:', err);
-    return false;
-  }
-}
-
-// Async function to add token
-async function addToken(token) {
-  if (!Token) return false;
-  try {
-    await Token.create({ token });
-    return true;
-  } catch (err) {
-    console.error('Token creation error:', err);
-    return false;
-  }
-}
-
-// Async function to remove token
-async function removeToken(token) {
-  if (!Token) return;
-  try {
-    await Token.deleteOne({ token });
-  } catch (err) {
-    console.error('Token removal error:', err);
-  }
 }
 
 // Middleware
@@ -72,7 +25,7 @@ app.use(cors({
 app.use(express.json());
 
 // Auth middleware - protects all /api routes except /api/login and /api/logout
-async function authMiddleware(req, res, next) {
+function authMiddleware(req, res, next) {
   // Skip auth for login and logout endpoints
   if (req.path === '/login' || req.path === '/logout') {
     return next();
@@ -86,9 +39,8 @@ async function authMiddleware(req, res, next) {
   
   const token = authHeader.split(' ')[1];
   
-  const valid = await isValidToken(token);
-  if (!valid) {
-    return res.status(401).json({ error: 'Unauthorized - Invalid or expired token' });
+  if (!validTokens.has(token)) {
+    return res.status(401).json({ error: 'Unauthorized - Invalid token' });
   }
   
   next();
@@ -113,36 +65,8 @@ const upload = multer({
 
 // MongoDB Connection
 mongoose.connect(process.env.MONGODB_URI)
-  .then(() => {
-    console.log('Connected to MongoDB');
-    // Initialize Token model after connection
-    Token = mongoose.model('Token', tokenSchema);
-  })
+  .then(() => console.log('Connected to MongoDB'))
   .catch(err => console.error('MongoDB connection error:', err));
-
-// Folder Schema
-const folderSchema = new mongoose.Schema({
-  name: {
-    type: String,
-    required: true,
-    trim: true
-  },
-  path: {
-    type: String,
-    required: true,
-    unique: true
-  },
-  parentPath: {
-    type: String,
-    default: '/'
-  },
-  createdAt: {
-    type: Date,
-    default: Date.now
-  }
-});
-
-const Folder = mongoose.model('Folder', folderSchema);
 
 // Note Schema
 const noteSchema = new mongoose.Schema({
@@ -177,45 +101,6 @@ function normalizePath(path) {
   return path;
 }
 
-// Helper function to ensure all folders in a path exist
-async function ensureFoldersExist(path) {
-  if (!path || path === '/') return;
-  
-  const normalizedPath = normalizePath(path);
-  const parts = normalizedPath.split('/').filter(p => p); // Remove empty strings
-  
-  let currentPath = '';
-  let parentPath = '/';
-  
-  for (const part of parts) {
-    currentPath = currentPath + '/' + part;
-    
-    // Check if folder exists
-    const existingFolder = await Folder.findOne({ path: currentPath });
-    
-    if (!existingFolder) {
-      // Create the folder
-      const folder = new Folder({
-        name: part,
-        path: currentPath,
-        parentPath: parentPath
-      });
-      
-      try {
-        await folder.save();
-        console.log(`Auto-created folder: ${currentPath}`);
-      } catch (err) {
-        // Ignore duplicate key errors (folder might have been created by another request)
-        if (err.code !== 11000) {
-          console.error(`Error creating folder ${currentPath}:`, err);
-        }
-      }
-    }
-    
-    parentPath = currentPath;
-  }
-}
-
 // Routes
 
 // Health check
@@ -237,7 +122,7 @@ app.post('/api/login', (req, res) => {
     const token = generateToken();
     validTokens.add(token);
     
-    // Optional: Clean up old tokens after 24 hours
+    // Clean up token after 24 hours
     setTimeout(() => {
       validTokens.delete(token);
     }, 24 * 60 * 60 * 1000);
@@ -258,73 +143,7 @@ app.post('/api/logout', (req, res) => {
   res.json({ success: true });
 });
 
-// Get all folders
-app.get('/api/folders', async (req, res) => {
-  try {
-    const parentPath = normalizePath(req.query.path);
-    const folders = await Folder.find({ parentPath }).sort({ name: 1 });
-    res.json(folders);
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch folders' });
-  }
-});
-
-// Create folder
-app.post('/api/folders', async (req, res) => {
-  try {
-    const { name, parentPath = '/' } = req.body;
-    
-    if (!name) {
-      return res.status(400).json({ error: 'Folder name is required' });
-    }
-    
-    const normalizedParent = normalizePath(parentPath);
-    const folderPath = normalizedParent === '/' ? `/${name}` : `${normalizedParent}/${name}`;
-    
-    // Check if folder already exists
-    const existingFolder = await Folder.findOne({ path: folderPath });
-    if (existingFolder) {
-      return res.status(400).json({ error: 'Folder already exists' });
-    }
-    
-    const folder = new Folder({
-      name,
-      path: folderPath,
-      parentPath: normalizedParent
-    });
-    
-    await folder.save();
-    res.status(201).json(folder);
-  } catch (error) {
-    console.error('Create folder error:', error);
-    res.status(500).json({ error: 'Failed to create folder' });
-  }
-});
-
-// Delete folder
-app.delete('/api/folders/:id', async (req, res) => {
-  try {
-    const folder = await Folder.findById(req.params.id);
-    if (!folder) {
-      return res.status(404).json({ error: 'Folder not found' });
-    }
-    
-    // Delete all notes in this folder and subfolders
-    await Note.deleteMany({ path: { $regex: `^${folder.path}` } });
-    
-    // Delete all subfolders
-    await Folder.deleteMany({ path: { $regex: `^${folder.path}` } });
-    
-    // Delete the folder itself
-    await Folder.findByIdAndDelete(req.params.id);
-    
-    res.json({ message: 'Folder deleted successfully' });
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to delete folder' });
-  }
-});
-
-// Get all notes (with folder support)
+// Get all notes (with folders derived from paths)
 app.get('/api/notes', async (req, res) => {
   try {
     const currentPath = normalizePath(req.query.path);
@@ -352,28 +171,21 @@ app.get('/api/notes', async (req, res) => {
     }));
     
     // Derive folders from all notes' paths
-    // Find all notes that are in subfolders of currentPath
-    let folderQuery;
+    // Get all notes that have a path starting with currentPath
+    let allNotesWithPaths;
     if (currentPath === '/') {
-      // Find notes with paths like "/something" or "/something/deeper"
-      folderQuery = { 
-        path: { $regex: '^/[^/]+', $ne: '/' },
-        $and: [
-          { path: { $exists: true } },
-          { path: { $ne: null } },
-          { path: { $ne: '' } }
-        ]
-      };
+      allNotesWithPaths = await Note.find({
+        path: { $exists: true, $ne: null, $ne: '', $ne: '/' }
+      }).select('path');
     } else {
-      // Find notes with paths that start with currentPath + "/"
-      folderQuery = { path: { $regex: `^${currentPath}/[^/]+` } };
+      allNotesWithPaths = await Note.find({
+        path: { $regex: `^${currentPath}/` }
+      }).select('path');
     }
-    
-    const notesInSubfolders = await Note.find(folderQuery).select('path');
     
     // Extract unique immediate child folder names
     const folderSet = new Set();
-    for (const note of notesInSubfolders) {
+    for (const note of allNotesWithPaths) {
       if (note.path) {
         let relativePath;
         if (currentPath === '/') {
@@ -390,25 +202,22 @@ app.get('/api/notes', async (req, res) => {
       }
     }
     
-    // Also check for folders from the Folder collection (if any exist)
-    const dbFolders = await Folder.find({ parentPath: currentPath }).select('name');
-    for (const folder of dbFolders) {
-      folderSet.add(folder.name);
-    }
-    
     // Build folder objects with counts
     const folders = [];
     for (const folderName of folderSet) {
       const folderPath = currentPath === '/' ? `/${folderName}` : `${currentPath}/${folderName}`;
       
-      // Count notes in this folder and subfolders
-      const noteCount = await Note.countDocuments({ 
-        path: { $regex: `^${folderPath}($|/)` } 
+      // Count notes in this folder (exact match)
+      const notesInFolder = await Note.countDocuments({ path: folderPath });
+      
+      // Count notes in subfolders
+      const notesInSubfolders = await Note.countDocuments({ 
+        path: { $regex: `^${folderPath}/` } 
       });
       
-      // Count immediate subfolders by looking at note paths
+      // Count immediate subfolders
       const subfolderNotes = await Note.find({ 
-        path: { $regex: `^${folderPath}/[^/]+` } 
+        path: { $regex: `^${folderPath}/` } 
       }).select('path');
       
       const subfolderSet = new Set();
@@ -419,11 +228,11 @@ app.get('/api/notes', async (req, res) => {
       }
       
       folders.push({
-        _id: folderName, // Use name as ID since we're deriving folders
+        _id: folderName,
         name: folderName,
         path: folderPath,
         parentPath: currentPath,
-        noteCount,
+        noteCount: notesInFolder + notesInSubfolders,
         folderCount: subfolderSet.size
       });
     }
@@ -466,9 +275,6 @@ app.post('/api/notes', upload.single('file'), async (req, res) => {
     const title = req.file.originalname.replace('.txt', '');
     const path = normalizePath(req.body.path);
 
-    // Auto-create any missing folders in the path
-    await ensureFoldersExist(path);
-
     const note = new Note({
       title: title,
       content: content,
@@ -503,9 +309,6 @@ app.patch('/api/notes', upload.single('file'), async (req, res) => {
     const content = req.file.buffer.toString('utf-8');
     const title = req.file.originalname.replace('.txt', '');
     const path = normalizePath(req.body.path);
-
-    // Auto-create any missing folders in the path
-    await ensureFoldersExist(path);
 
     // Try to find existing note by title and path
     let note = await Note.findOne({ title: title, path: path });
@@ -590,53 +393,6 @@ app.delete('/api/notes/:id', async (req, res) => {
     res.json({ message: 'Note deleted successfully' });
   } catch (error) {
     res.status(500).json({ error: 'Failed to delete note' });
-  }
-});
-
-// Sync folders - creates missing folders for all existing notes
-app.post('/api/sync-folders', async (req, res) => {
-  try {
-    // Get all unique paths from notes
-    const notes = await Note.find({ path: { $exists: true, $ne: '/', $ne: null, $ne: '' } });
-    const paths = [...new Set(notes.map(n => n.path))];
-    
-    let created = 0;
-    for (const path of paths) {
-      const normalizedPath = normalizePath(path);
-      if (normalizedPath !== '/') {
-        const parts = normalizedPath.split('/').filter(p => p);
-        let currentPath = '';
-        let parentPath = '/';
-        
-        for (const part of parts) {
-          currentPath = currentPath + '/' + part;
-          
-          const existingFolder = await Folder.findOne({ path: currentPath });
-          if (!existingFolder) {
-            const folder = new Folder({
-              name: part,
-              path: currentPath,
-              parentPath: parentPath
-            });
-            try {
-              await folder.save();
-              created++;
-              console.log(`Created missing folder: ${currentPath}`);
-            } catch (err) {
-              if (err.code !== 11000) {
-                console.error(`Error creating folder ${currentPath}:`, err);
-              }
-            }
-          }
-          parentPath = currentPath;
-        }
-      }
-    }
-    
-    res.json({ message: `Sync complete. Created ${created} folders.`, created });
-  } catch (error) {
-    console.error('Sync folders error:', error);
-    res.status(500).json({ error: 'Failed to sync folders' });
   }
 });
 
