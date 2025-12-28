@@ -8,12 +8,59 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Simple token storage (in production, use Redis or similar)
-const validTokens = new Set();
+// Token Schema for persistent storage
+const tokenSchema = new mongoose.Schema({
+  token: {
+    type: String,
+    required: true,
+    unique: true
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now,
+    expires: 86400 // Auto-delete after 24 hours (TTL index)
+  }
+});
+
+let Token; // Will be initialized after mongoose connects
 
 // Generate a random token
 function generateToken() {
   return crypto.randomBytes(32).toString('hex');
+}
+
+// Async function to check if token is valid
+async function isValidToken(token) {
+  if (!Token) return false;
+  try {
+    const found = await Token.findOne({ token });
+    return !!found;
+  } catch (err) {
+    console.error('Token validation error:', err);
+    return false;
+  }
+}
+
+// Async function to add token
+async function addToken(token) {
+  if (!Token) return false;
+  try {
+    await Token.create({ token });
+    return true;
+  } catch (err) {
+    console.error('Token creation error:', err);
+    return false;
+  }
+}
+
+// Async function to remove token
+async function removeToken(token) {
+  if (!Token) return;
+  try {
+    await Token.deleteOne({ token });
+  } catch (err) {
+    console.error('Token removal error:', err);
+  }
 }
 
 // Middleware
@@ -25,7 +72,7 @@ app.use(cors({
 app.use(express.json());
 
 // Auth middleware - protects all /api routes except /api/login and /api/logout
-function authMiddleware(req, res, next) {
+async function authMiddleware(req, res, next) {
   // Skip auth for login and logout endpoints
   if (req.path === '/login' || req.path === '/logout') {
     return next();
@@ -39,8 +86,9 @@ function authMiddleware(req, res, next) {
   
   const token = authHeader.split(' ')[1];
   
-  if (!validTokens.has(token)) {
-    return res.status(401).json({ error: 'Unauthorized - Invalid token' });
+  const valid = await isValidToken(token);
+  if (!valid) {
+    return res.status(401).json({ error: 'Unauthorized - Invalid or expired token' });
   }
   
   next();
@@ -65,7 +113,11 @@ const upload = multer({
 
 // MongoDB Connection
 mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log('Connected to MongoDB'))
+  .then(() => {
+    console.log('Connected to MongoDB');
+    // Initialize Token model after connection
+    Token = mongoose.model('Token', tokenSchema);
+  })
   .catch(err => console.error('MongoDB connection error:', err));
 
 // Folder Schema
@@ -277,9 +329,6 @@ app.get('/api/notes', async (req, res) => {
   try {
     const currentPath = normalizePath(req.query.path);
     
-    // Get folders in current path
-    const folders = await Folder.find({ parentPath: currentPath }).sort({ name: 1 });
-    
     // Get notes in current path
     // For root path, also include notes that don't have a path field (legacy notes)
     let noteQuery;
@@ -299,27 +348,92 @@ app.get('/api/notes', async (req, res) => {
       title: note.title,
       preview: note.content.substring(0, 200) + (note.content.length > 200 ? '...' : ''),
       lastModified: note.lastModified,
-      path: note.path
+      path: note.path || '/'
     }));
     
-    // For each folder, count items inside
-    const foldersWithCounts = await Promise.all(folders.map(async (folder) => {
-      const noteCount = await Note.countDocuments({ path: { $regex: `^${folder.path}($|/)` } });
-      const folderCount = await Folder.countDocuments({ parentPath: folder.path });
-      
-      return {
-        _id: folder._id,
-        name: folder.name,
-        path: folder.path,
-        parentPath: folder.parentPath,
-        noteCount,
-        folderCount
+    // Derive folders from all notes' paths
+    // Find all notes that are in subfolders of currentPath
+    let folderQuery;
+    if (currentPath === '/') {
+      // Find notes with paths like "/something" or "/something/deeper"
+      folderQuery = { 
+        path: { $regex: '^/[^/]+', $ne: '/' },
+        $and: [
+          { path: { $exists: true } },
+          { path: { $ne: null } },
+          { path: { $ne: '' } }
+        ]
       };
-    }));
+    } else {
+      // Find notes with paths that start with currentPath + "/"
+      folderQuery = { path: { $regex: `^${currentPath}/[^/]+` } };
+    }
+    
+    const notesInSubfolders = await Note.find(folderQuery).select('path');
+    
+    // Extract unique immediate child folder names
+    const folderSet = new Set();
+    for (const note of notesInSubfolders) {
+      if (note.path) {
+        let relativePath;
+        if (currentPath === '/') {
+          relativePath = note.path.substring(1); // Remove leading /
+        } else {
+          relativePath = note.path.substring(currentPath.length + 1); // Remove currentPath/
+        }
+        
+        // Get the first segment (immediate child folder)
+        const firstSegment = relativePath.split('/')[0];
+        if (firstSegment) {
+          folderSet.add(firstSegment);
+        }
+      }
+    }
+    
+    // Also check for folders from the Folder collection (if any exist)
+    const dbFolders = await Folder.find({ parentPath: currentPath }).select('name');
+    for (const folder of dbFolders) {
+      folderSet.add(folder.name);
+    }
+    
+    // Build folder objects with counts
+    const folders = [];
+    for (const folderName of folderSet) {
+      const folderPath = currentPath === '/' ? `/${folderName}` : `${currentPath}/${folderName}`;
+      
+      // Count notes in this folder and subfolders
+      const noteCount = await Note.countDocuments({ 
+        path: { $regex: `^${folderPath}($|/)` } 
+      });
+      
+      // Count immediate subfolders by looking at note paths
+      const subfolderNotes = await Note.find({ 
+        path: { $regex: `^${folderPath}/[^/]+` } 
+      }).select('path');
+      
+      const subfolderSet = new Set();
+      for (const note of subfolderNotes) {
+        const rel = note.path.substring(folderPath.length + 1);
+        const seg = rel.split('/')[0];
+        if (seg) subfolderSet.add(seg);
+      }
+      
+      folders.push({
+        _id: folderName, // Use name as ID since we're deriving folders
+        name: folderName,
+        path: folderPath,
+        parentPath: currentPath,
+        noteCount,
+        folderCount: subfolderSet.size
+      });
+    }
+    
+    // Sort folders alphabetically
+    folders.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
     
     res.json({
       currentPath,
-      folders: foldersWithCounts,
+      folders,
       notes: notesWithPreview
     });
   } catch (error) {
