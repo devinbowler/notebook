@@ -19,7 +19,7 @@ function generateToken() {
 // Middleware
 app.use(cors({
   origin: '*',
-  methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+  methods: ['GET', 'POST', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 app.use(express.json());
@@ -27,7 +27,6 @@ app.use(express.json());
 // Auth middleware - protects all /api routes except /api/login and /api/logout
 function authMiddleware(req, res, next) {
   // Skip auth for login and logout endpoints
-  // When mounted at /api, req.path is relative (e.g., /login, not /api/login)
   if (req.path === '/login' || req.path === '/logout') {
     return next();
   }
@@ -69,6 +68,30 @@ mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('Connected to MongoDB'))
   .catch(err => console.error('MongoDB connection error:', err));
 
+// Folder Schema
+const folderSchema = new mongoose.Schema({
+  name: {
+    type: String,
+    required: true,
+    trim: true
+  },
+  path: {
+    type: String,
+    required: true,
+    unique: true
+  },
+  parentPath: {
+    type: String,
+    default: '/'
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now
+  }
+});
+
+const Folder = mongoose.model('Folder', folderSchema);
+
 // Note Schema
 const noteSchema = new mongoose.Schema({
   title: {
@@ -80,6 +103,10 @@ const noteSchema = new mongoose.Schema({
     type: String,
     required: true
   },
+  path: {
+    type: String,
+    default: '/'
+  },
   lastModified: {
     type: Date,
     default: Date.now
@@ -87,6 +114,16 @@ const noteSchema = new mongoose.Schema({
 });
 
 const Note = mongoose.model('Note', noteSchema);
+
+// Helper function to normalize paths
+function normalizePath(path) {
+  if (!path || path === '') return '/';
+  // Ensure path starts with /
+  if (!path.startsWith('/')) path = '/' + path;
+  // Remove trailing slash (except for root)
+  if (path !== '/' && path.endsWith('/')) path = path.slice(0, -1);
+  return path;
+}
 
 // Routes
 
@@ -130,11 +167,83 @@ app.post('/api/logout', (req, res) => {
   res.json({ success: true });
 });
 
-// Get all notes (without full content for grid view)
+// Get all folders
+app.get('/api/folders', async (req, res) => {
+  try {
+    const parentPath = normalizePath(req.query.path);
+    const folders = await Folder.find({ parentPath }).sort({ name: 1 });
+    res.json(folders);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch folders' });
+  }
+});
+
+// Create folder
+app.post('/api/folders', async (req, res) => {
+  try {
+    const { name, parentPath = '/' } = req.body;
+    
+    if (!name) {
+      return res.status(400).json({ error: 'Folder name is required' });
+    }
+    
+    const normalizedParent = normalizePath(parentPath);
+    const folderPath = normalizedParent === '/' ? `/${name}` : `${normalizedParent}/${name}`;
+    
+    // Check if folder already exists
+    const existingFolder = await Folder.findOne({ path: folderPath });
+    if (existingFolder) {
+      return res.status(400).json({ error: 'Folder already exists' });
+    }
+    
+    const folder = new Folder({
+      name,
+      path: folderPath,
+      parentPath: normalizedParent
+    });
+    
+    await folder.save();
+    res.status(201).json(folder);
+  } catch (error) {
+    console.error('Create folder error:', error);
+    res.status(500).json({ error: 'Failed to create folder' });
+  }
+});
+
+// Delete folder
+app.delete('/api/folders/:id', async (req, res) => {
+  try {
+    const folder = await Folder.findById(req.params.id);
+    if (!folder) {
+      return res.status(404).json({ error: 'Folder not found' });
+    }
+    
+    // Delete all notes in this folder and subfolders
+    await Note.deleteMany({ path: { $regex: `^${folder.path}` } });
+    
+    // Delete all subfolders
+    await Folder.deleteMany({ path: { $regex: `^${folder.path}` } });
+    
+    // Delete the folder itself
+    await Folder.findByIdAndDelete(req.params.id);
+    
+    res.json({ message: 'Folder deleted successfully' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to delete folder' });
+  }
+});
+
+// Get all notes (with folder support)
 app.get('/api/notes', async (req, res) => {
   try {
-    const notes = await Note.find()
-      .select('title content lastModified')
+    const currentPath = normalizePath(req.query.path);
+    
+    // Get folders in current path
+    const folders = await Folder.find({ parentPath: currentPath }).sort({ name: 1 });
+    
+    // Get notes in current path
+    const notes = await Note.find({ path: currentPath })
+      .select('title content lastModified path')
       .sort({ lastModified: -1 });
     
     // Create preview of content (first 200 chars)
@@ -142,11 +251,32 @@ app.get('/api/notes', async (req, res) => {
       _id: note._id,
       title: note.title,
       preview: note.content.substring(0, 200) + (note.content.length > 200 ? '...' : ''),
-      lastModified: note.lastModified
+      lastModified: note.lastModified,
+      path: note.path
     }));
     
-    res.json(notesWithPreview);
+    // For each folder, count items inside
+    const foldersWithCounts = await Promise.all(folders.map(async (folder) => {
+      const noteCount = await Note.countDocuments({ path: { $regex: `^${folder.path}($|/)` } });
+      const folderCount = await Folder.countDocuments({ parentPath: folder.path });
+      
+      return {
+        _id: folder._id,
+        name: folder.name,
+        path: folder.path,
+        parentPath: folder.parentPath,
+        noteCount,
+        folderCount
+      };
+    }));
+    
+    res.json({
+      currentPath,
+      folders: foldersWithCounts,
+      notes: notesWithPreview
+    });
   } catch (error) {
+    console.error('Fetch notes error:', error);
     res.status(500).json({ error: 'Failed to fetch notes' });
   }
 });
@@ -173,10 +303,12 @@ app.post('/api/notes', upload.single('file'), async (req, res) => {
 
     const content = req.file.buffer.toString('utf-8');
     const title = req.file.originalname.replace('.txt', '');
+    const path = normalizePath(req.body.path);
 
     const note = new Note({
       title: title,
       content: content,
+      path: path,
       lastModified: new Date()
     });
 
@@ -187,7 +319,8 @@ app.post('/api/notes', upload.single('file'), async (req, res) => {
         _id: note._id,
         title: note.title,
         preview: note.content.substring(0, 200),
-        lastModified: note.lastModified
+        lastModified: note.lastModified,
+        path: note.path
       }
     });
   } catch (error) {
@@ -205,9 +338,10 @@ app.patch('/api/notes', upload.single('file'), async (req, res) => {
 
     const content = req.file.buffer.toString('utf-8');
     const title = req.file.originalname.replace('.txt', '');
+    const path = normalizePath(req.body.path);
 
-    // Try to find existing note by title
-    let note = await Note.findOne({ title: title });
+    // Try to find existing note by title and path
+    let note = await Note.findOne({ title: title, path: path });
 
     if (note) {
       // Update existing
@@ -220,7 +354,8 @@ app.patch('/api/notes', upload.single('file'), async (req, res) => {
           _id: note._id,
           title: note.title,
           preview: note.content.substring(0, 200),
-          lastModified: note.lastModified
+          lastModified: note.lastModified,
+          path: note.path
         }
       });
     } else {
@@ -228,6 +363,7 @@ app.patch('/api/notes', upload.single('file'), async (req, res) => {
       note = new Note({
         title: title,
         content: content,
+        path: path,
         lastModified: new Date()
       });
       await note.save();
@@ -237,13 +373,43 @@ app.patch('/api/notes', upload.single('file'), async (req, res) => {
           _id: note._id,
           title: note.title,
           preview: note.content.substring(0, 200),
-          lastModified: note.lastModified
+          lastModified: note.lastModified,
+          path: note.path
         }
       });
     }
   } catch (error) {
     console.error('Update error:', error);
     res.status(500).json({ error: 'Failed to save note' });
+  }
+});
+
+// Move note to different folder
+app.patch('/api/notes/:id/move', async (req, res) => {
+  try {
+    const { newPath } = req.body;
+    const normalizedPath = normalizePath(newPath);
+    
+    const note = await Note.findByIdAndUpdate(
+      req.params.id,
+      { path: normalizedPath, lastModified: new Date() },
+      { new: true }
+    );
+    
+    if (!note) {
+      return res.status(404).json({ error: 'Note not found' });
+    }
+    
+    res.json({ 
+      message: 'Note moved successfully',
+      note: {
+        _id: note._id,
+        title: note.title,
+        path: note.path
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to move note' });
   }
 });
 
