@@ -242,7 +242,15 @@ app.get('/api/notes', async (req, res) => {
     const folders = await Folder.find({ parentPath: currentPath }).sort({ name: 1 });
     
     // Get notes in current path
-    const notes = await Note.find({ path: currentPath })
+    // For root path, also include notes that don't have a path field (legacy notes)
+    let noteQuery;
+    if (currentPath === '/') {
+      noteQuery = { $or: [{ path: '/' }, { path: { $exists: false } }, { path: null }, { path: '' }] };
+    } else {
+      noteQuery = { path: currentPath };
+    }
+    
+    const notes = await Note.find(noteQuery)
       .select('title content lastModified path')
       .sort({ lastModified: -1 });
     
