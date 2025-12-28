@@ -125,6 +125,45 @@ function normalizePath(path) {
   return path;
 }
 
+// Helper function to ensure all folders in a path exist
+async function ensureFoldersExist(path) {
+  if (!path || path === '/') return;
+  
+  const normalizedPath = normalizePath(path);
+  const parts = normalizedPath.split('/').filter(p => p); // Remove empty strings
+  
+  let currentPath = '';
+  let parentPath = '/';
+  
+  for (const part of parts) {
+    currentPath = currentPath + '/' + part;
+    
+    // Check if folder exists
+    const existingFolder = await Folder.findOne({ path: currentPath });
+    
+    if (!existingFolder) {
+      // Create the folder
+      const folder = new Folder({
+        name: part,
+        path: currentPath,
+        parentPath: parentPath
+      });
+      
+      try {
+        await folder.save();
+        console.log(`Auto-created folder: ${currentPath}`);
+      } catch (err) {
+        // Ignore duplicate key errors (folder might have been created by another request)
+        if (err.code !== 11000) {
+          console.error(`Error creating folder ${currentPath}:`, err);
+        }
+      }
+    }
+    
+    parentPath = currentPath;
+  }
+}
+
 // Routes
 
 // Health check
@@ -313,6 +352,9 @@ app.post('/api/notes', upload.single('file'), async (req, res) => {
     const title = req.file.originalname.replace('.txt', '');
     const path = normalizePath(req.body.path);
 
+    // Auto-create any missing folders in the path
+    await ensureFoldersExist(path);
+
     const note = new Note({
       title: title,
       content: content,
@@ -347,6 +389,9 @@ app.patch('/api/notes', upload.single('file'), async (req, res) => {
     const content = req.file.buffer.toString('utf-8');
     const title = req.file.originalname.replace('.txt', '');
     const path = normalizePath(req.body.path);
+
+    // Auto-create any missing folders in the path
+    await ensureFoldersExist(path);
 
     // Try to find existing note by title and path
     let note = await Note.findOne({ title: title, path: path });
@@ -431,6 +476,53 @@ app.delete('/api/notes/:id', async (req, res) => {
     res.json({ message: 'Note deleted successfully' });
   } catch (error) {
     res.status(500).json({ error: 'Failed to delete note' });
+  }
+});
+
+// Sync folders - creates missing folders for all existing notes
+app.post('/api/sync-folders', async (req, res) => {
+  try {
+    // Get all unique paths from notes
+    const notes = await Note.find({ path: { $exists: true, $ne: '/', $ne: null, $ne: '' } });
+    const paths = [...new Set(notes.map(n => n.path))];
+    
+    let created = 0;
+    for (const path of paths) {
+      const normalizedPath = normalizePath(path);
+      if (normalizedPath !== '/') {
+        const parts = normalizedPath.split('/').filter(p => p);
+        let currentPath = '';
+        let parentPath = '/';
+        
+        for (const part of parts) {
+          currentPath = currentPath + '/' + part;
+          
+          const existingFolder = await Folder.findOne({ path: currentPath });
+          if (!existingFolder) {
+            const folder = new Folder({
+              name: part,
+              path: currentPath,
+              parentPath: parentPath
+            });
+            try {
+              await folder.save();
+              created++;
+              console.log(`Created missing folder: ${currentPath}`);
+            } catch (err) {
+              if (err.code !== 11000) {
+                console.error(`Error creating folder ${currentPath}:`, err);
+              }
+            }
+          }
+          parentPath = currentPath;
+        }
+      }
+    }
+    
+    res.json({ message: `Sync complete. Created ${created} folders.`, created });
+  } catch (error) {
+    console.error('Sync folders error:', error);
+    res.status(500).json({ error: 'Failed to sync folders' });
   }
 });
 
