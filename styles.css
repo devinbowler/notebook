@@ -640,36 +640,37 @@ body {
 .copy-button {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  padding: 0.5rem 1rem;
-  background: var(--green-800);
-  border: none;
+  justify-content: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  padding: 0;
+  background: transparent;
+  border: 1px solid var(--gray-300);
   border-radius: 0.5rem;
-  color: var(--white);
-  font-family: var(--font-body);
-  font-size: 0.875rem;
-  font-weight: 500;
+  color: var(--gray-500);
   cursor: pointer;
   transition: all var(--transition-fast);
 }
 
 .copy-button:hover {
-  background: var(--green-900);
-  transform: translateY(-1px);
-  box-shadow: var(--shadow-md);
+  background: var(--green-50);
+  border-color: var(--green-600);
+  color: var(--green-700);
 }
 
 .copy-button:active {
-  transform: translateY(0);
+  transform: scale(0.95);
 }
 
 .copy-button.copied {
-  background: var(--green-600);
+  background: var(--green-100);
+  border-color: var(--green-600);
+  color: var(--green-700);
 }
 
 .copy-button svg {
-  width: 1rem;
-  height: 1rem;
+  width: 1.1rem;
+  height: 1.1rem;
 }
 
 .delete-button {
@@ -1086,15 +1087,5 @@ body {
   .add-button {
     bottom: 1.5rem;
     right: 1.5rem;
-  }
-
-  .copy-button span {
-    display: none;
-  }
-
-  .copy-button {
-    padding: 0.5rem;
-    width: 2.5rem;
-    height: 2.5rem;
   }
 }
