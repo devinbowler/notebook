@@ -125,12 +125,11 @@ class NotesApp {
       const originalHTML = this.copyBtn.innerHTML;
       this.copyBtn.innerHTML = `
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-          <path d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+          <path d="M5 13l4 4L19 7"/>
         </svg>
-        <span>Copied!</span>
       `;
 
-      this.showToast('Content copied to clipboard!', 'success');
+      this.showToast('Copied to clipboard!', 'success');
 
       // Reset button after 2 seconds
       setTimeout(() => {
