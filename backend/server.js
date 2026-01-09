@@ -396,6 +396,33 @@ app.delete('/api/notes/:id', async (req, res) => {
   }
 });
 
+// Delete folder and all its contents
+app.delete('/api/folders', async (req, res) => {
+  try {
+    const folderPath = normalizePath(req.query.path);
+    
+    if (folderPath === '/') {
+      return res.status(400).json({ error: 'Cannot delete root folder' });
+    }
+    
+    // Delete all notes in this folder and subfolders
+    const result = await Note.deleteMany({
+      $or: [
+        { path: folderPath },
+        { path: { $regex: `^${folderPath}/` } }
+      ]
+    });
+    
+    res.json({ 
+      message: 'Folder deleted successfully',
+      deletedCount: result.deletedCount
+    });
+  } catch (error) {
+    console.error('Delete folder error:', error);
+    res.status(500).json({ error: 'Failed to delete folder' });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
