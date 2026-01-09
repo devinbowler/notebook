@@ -8,9 +8,6 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Simple token storage (in memory - tokens reset on server restart)
-const validTokens = new Set();
-
 // Generate a random token
 function generateToken() {
   return crypto.randomBytes(32).toString('hex');
@@ -24,8 +21,29 @@ app.use(cors({
 }));
 app.use(express.json());
 
+// MongoDB Connection
+mongoose.connect(process.env.MONGODB_URI)
+  .then(() => console.log('Connected to MongoDB'))
+  .catch(err => console.error('MongoDB connection error:', err));
+
+// Token Schema - stores auth tokens persistently
+const tokenSchema = new mongoose.Schema({
+  token: {
+    type: String,
+    required: true,
+    unique: true
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now,
+    expires: 30 * 24 * 60 * 60 // Auto-delete after 30 days (TTL index)
+  }
+});
+
+const Token = mongoose.model('Token', tokenSchema);
+
 // Auth middleware - protects all /api routes except /api/login and /api/logout
-function authMiddleware(req, res, next) {
+async function authMiddleware(req, res, next) {
   // Skip auth for login and logout endpoints
   if (req.path === '/login' || req.path === '/logout') {
     return next();
@@ -39,11 +57,15 @@ function authMiddleware(req, res, next) {
   
   const token = authHeader.split(' ')[1];
   
-  if (!validTokens.has(token)) {
-    return res.status(401).json({ error: 'Unauthorized - Invalid token' });
+  try {
+    const validToken = await Token.findOne({ token: token });
+    if (!validToken) {
+      return res.status(401).json({ error: 'Unauthorized - Invalid token' });
+    }
+    next();
+  } catch (error) {
+    return res.status(401).json({ error: 'Unauthorized - Token validation failed' });
   }
-  
-  next();
 }
 
 // Apply auth middleware to all /api routes
@@ -62,11 +84,6 @@ const upload = multer({
   },
   limits: { fileSize: 5 * 1024 * 1024 } // 5MB limit
 });
-
-// MongoDB Connection
-mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log('Connected to MongoDB'))
-  .catch(err => console.error('MongoDB connection error:', err));
 
 // Note Schema
 const noteSchema = new mongoose.Schema({
@@ -109,7 +126,7 @@ app.get('/', (req, res) => {
 });
 
 // Login endpoint
-app.post('/api/login', (req, res) => {
+app.post('/api/login', async (req, res) => {
   const { password } = req.body;
   const correctPassword = process.env.APP_PASSWORD;
   
@@ -120,25 +137,30 @@ app.post('/api/login', (req, res) => {
   
   if (password === correctPassword) {
     const token = generateToken();
-    validTokens.add(token);
     
-    // Clean up token after 24 hours
-    setTimeout(() => {
-      validTokens.delete(token);
-    }, 24 * 60 * 60 * 1000);
-    
-    res.json({ success: true, token });
+    try {
+      // Save token to database
+      await Token.create({ token: token });
+      res.json({ success: true, token });
+    } catch (error) {
+      console.error('Token save error:', error);
+      res.status(500).json({ error: 'Failed to create session' });
+    }
   } else {
     res.status(401).json({ error: 'Invalid password' });
   }
 });
 
 // Logout endpoint
-app.post('/api/logout', (req, res) => {
+app.post('/api/logout', async (req, res) => {
   const authHeader = req.headers.authorization;
   if (authHeader && authHeader.startsWith('Bearer ')) {
     const token = authHeader.split(' ')[1];
-    validTokens.delete(token);
+    try {
+      await Token.deleteOne({ token: token });
+    } catch (error) {
+      // Ignore errors on logout
+    }
   }
   res.json({ success: true });
 });
