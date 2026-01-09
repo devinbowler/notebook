@@ -383,7 +383,31 @@ app.patch('/api/notes/:id/move', async (req, res) => {
   }
 });
 
-// Delete note
+// Delete note by title and path (must be before :id route)
+app.delete('/api/notes/by-title', async (req, res) => {
+  try {
+    const title = req.query.title;
+    const path = normalizePath(req.query.path);
+    
+    if (!title) {
+      return res.status(400).json({ error: 'Title is required' });
+    }
+    
+    const note = await Note.findOneAndDelete({ title: title, path: path });
+    if (!note) {
+      // Also try without path for legacy notes
+      const legacyNote = await Note.findOneAndDelete({ title: title });
+      if (!legacyNote) {
+        return res.status(404).json({ error: 'Note not found' });
+      }
+    }
+    res.json({ message: 'Note deleted successfully' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to delete note' });
+  }
+});
+
+// Delete note by ID
 app.delete('/api/notes/:id', async (req, res) => {
   try {
     const note = await Note.findByIdAndDelete(req.params.id);
